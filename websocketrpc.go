@@ -26,6 +26,10 @@ func NewServer(addr string) *Server {
 }
 
 // Register a type with the RPC server
+// Methods must be Exported (capital first letter)
+// First Arg must be the websocket.Conn type
+// Optional second Arg for data
+// If have return type, it is encoded and sent back over connection
 func (srv *Server) Register(rcvr interface{}) error {
 	s := new(service)
 	s.typ = reflect.TypeOf(rcvr)
@@ -49,6 +53,19 @@ func (srv *Server) StartServer() {
 	log.Fatal(http.ListenAndServe(srv.addr, nil))
 }
 
+// Send a message over websocket with subject and data
+func Send(conn *websocket.Conn, subject string, data interface{}) error {
+	if conn == nil {
+		return fmt.Errorf("No connection; send failed")
+	}
+	type SocketRPCItem struct {
+		Subject string
+		Data    interface{}
+	}
+	t := &SocketRPCItem{Subject: subject, Data: data}
+	return conn.WriteJSON(t)
+}
+
 func (srv *Server) rpcHandler(w http.ResponseWriter, r *http.Request) {
 	upgrader := websocket.Upgrader{} // use default options
 	con, err := upgrader.Upgrade(w, r, nil)
@@ -56,6 +73,7 @@ func (srv *Server) rpcHandler(w http.ResponseWriter, r *http.Request) {
 		log.Println(err)
 		return
 	}
+	log.Println("Started websocket connection with ", con.RemoteAddr())
 	for {
 		messageType, p, err := con.ReadMessage()
 		if err != nil {
@@ -71,7 +89,7 @@ func (srv *Server) rpcHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (srv *Server) processRPCMessage(conn *websocket.Conn, b []byte) {
+func (srv *Server) processRPCMessage(con *websocket.Conn, b []byte) {
 	type SocketRPCItem struct {
 		Subject string
 		Data    json.RawMessage
@@ -104,7 +122,7 @@ func (srv *Server) processRPCMessage(conn *websocket.Conn, b []byte) {
 
 	if mt.hasArg == false {
 		log.Printf("RPC call %v", sock.Subject)
-		returnValues = function.Call([]reflect.Value{service.rcvr})
+		returnValues = function.Call([]reflect.Value{service.rcvr, reflect.ValueOf(con)})
 	} else {
 		var argv reflect.Value
 		argIsValue := false // if true, need to indirect before calling.
@@ -123,10 +141,10 @@ func (srv *Server) processRPCMessage(conn *websocket.Conn, b []byte) {
 			argv = argv.Elem()
 		}
 		log.Printf("RPC call %v with: %v\n ", sock.Subject, string(sock.Data))
-		returnValues = function.Call([]reflect.Value{service.rcvr, argv})
+		returnValues = function.Call([]reflect.Value{service.rcvr, reflect.ValueOf(con), argv})
 	}
 	if len(returnValues) > 0 {
-		err = conn.WriteJSON(returnValues[0].Interface())
+		err = con.WriteJSON(returnValues[0].Interface())
 		if err != nil {
 			log.Println("Error sending return ", err)
 		}
@@ -150,8 +168,6 @@ type methodType struct {
 // suitableMethods returns suitable methods from the type being registered
 func suitableMethods(typ reflect.Type) map[string]*methodType {
 	methods := make(map[string]*methodType)
-	fmt.Println("Type ", typ)
-	fmt.Println("Number of methods to register ", typ.NumMethod())
 	for m := 0; m < typ.NumMethod(); m++ {
 		method := typ.Method(m)
 		mtype := method.Type
@@ -162,16 +178,16 @@ func suitableMethods(typ reflect.Type) map[string]*methodType {
 			continue
 		}
 		savedMethod := &methodType{method: method}
+		// NumIn(0) = receiver, (1) should be websocket.Conn, (2) should be optional data
 		switch mtype.NumIn() {
-		case 1:
-			savedMethod.hasArg = false
 		case 2:
+			savedMethod.hasArg = false
+		case 3:
 			savedMethod.hasArg = true
-			savedMethod.ArgType = mtype.In(1)
+			savedMethod.ArgType = mtype.In(2)
 		default:
 			log.Printf("Register: method %q has bad number of arguments\n", mname)
 		}
-
 		if mtype.NumOut() > 1 {
 			log.Printf("Register: method %q has bad number of return values, max is 1\n", mname)
 		}
