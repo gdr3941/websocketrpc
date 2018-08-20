@@ -15,19 +15,20 @@ import (
 type Server struct {
 	addr       string
 	serviceMap map[string]*service
+	logging    bool
 }
 
 // NewServer creates a new WebSocketRPCServer on addr (ex. localhost:8080)
-func NewServer(addr string) *Server {
-	srv := &Server{}
-	srv.addr = addr
+// errors are always logged; setting logging adds additional logging of calls
+func NewServer(addr string, logging bool) *Server {
+	srv := &Server{addr: addr, logging: logging}
 	srv.serviceMap = make(map[string]*service)
 	return srv
 }
 
-// Register a type with the RPC server
+// Register a type with the server
 // Methods must be Exported (capital first letter)
-// First Arg must be the websocket.Conn type
+// First Arg must be the websocket.Conn type for receiving the active connection
 // Optional second Arg for data
 // If have return type, it is encoded and sent back over connection
 func (srv *Server) Register(rcvr interface{}) error {
@@ -53,7 +54,7 @@ func (srv *Server) StartServer() {
 	log.Fatal(http.ListenAndServe(srv.addr, nil))
 }
 
-// Send a message over websocket with subject and data
+// Send a message with subject and data over websocket in JSON format
 func Send(conn *websocket.Conn, subject string, data interface{}) error {
 	if conn == nil {
 		return fmt.Errorf("No connection; send failed")
@@ -73,7 +74,9 @@ func (srv *Server) rpcHandler(w http.ResponseWriter, r *http.Request) {
 		log.Println(err)
 		return
 	}
-	log.Println("Started websocket connection with ", con.RemoteAddr())
+	if srv.logging {
+		log.Println("Started websocket connection with ", con.RemoteAddr())
+	}
 	for {
 		messageType, p, err := con.ReadMessage()
 		if err != nil {
@@ -81,7 +84,6 @@ func (srv *Server) rpcHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if messageType == 1 {
-			//log.Printf("Message: %v\n", string(p))
 			srv.processRPCMessage(con, p)
 		} else {
 			log.Printf("Received Message Type %v, not handling\n", messageType)
@@ -119,28 +121,21 @@ func (srv *Server) processRPCMessage(con *websocket.Conn, b []byte) {
 
 	function := mt.method.Func
 	var returnValues []reflect.Value
-
-	if mt.hasArg == false {
-		log.Printf("RPC call %v", sock.Subject)
-		returnValues = function.Call([]reflect.Value{service.rcvr, reflect.ValueOf(con)})
-	} else {
-		var argv reflect.Value
-		argIsValue := false // if true, need to indirect before calling.
-		if mt.ArgType.Kind() == reflect.Ptr {
-			argv = reflect.New(mt.ArgType.Elem())
-		} else {
-			argv = reflect.New(mt.ArgType)
-			argIsValue = true
+	switch mt.hasArg {
+	case false:
+		if srv.logging {
+			log.Printf("RPC call %v", sock.Subject)
 		}
-		err = json.Unmarshal(sock.Data, argv.Interface())
+		returnValues = function.Call([]reflect.Value{service.rcvr, reflect.ValueOf(con)})
+	case true:
+		argv, err := buildArg(mt, sock.Data)
 		if err != nil {
 			log.Printf("For method %v, data sent did not match method signature: %v\n", sock.Subject, string(sock.Data))
 			return
 		}
-		if argIsValue {
-			argv = argv.Elem()
+		if srv.logging {
+			log.Printf("RPC call %v with: %v\n ", sock.Subject, string(sock.Data))
 		}
-		log.Printf("RPC call %v with: %v\n ", sock.Subject, string(sock.Data))
 		returnValues = function.Call([]reflect.Value{service.rcvr, reflect.ValueOf(con), argv})
 	}
 	if len(returnValues) > 0 {
@@ -149,6 +144,26 @@ func (srv *Server) processRPCMessage(con *websocket.Conn, b []byte) {
 			log.Println("Error sending return ", err)
 		}
 	}
+}
+
+// buildArg returns the argument for the function call
+func buildArg(mt *methodType, d json.RawMessage) (reflect.Value, error) {
+	var argv reflect.Value
+	argIsValue := false // if true, need to indirect before calling.
+	if mt.ArgType.Kind() == reflect.Ptr {
+		argv = reflect.New(mt.ArgType.Elem())
+	} else {
+		argv = reflect.New(mt.ArgType)
+		argIsValue = true
+	}
+	err := json.Unmarshal(d, argv.Interface())
+	if err != nil {
+		return argv, err
+	}
+	if argIsValue {
+		argv = argv.Elem()
+	}
+	return argv, nil
 }
 
 // service represents the info on one class type (name) that is registered
