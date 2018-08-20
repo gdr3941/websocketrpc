@@ -37,12 +37,12 @@ func (srv *Server) Register(rcvr interface{}) error {
 	s.rcvr = reflect.ValueOf(rcvr)
 	sname := reflect.Indirect(s.rcvr).Type().Name()
 	if sname == "" {
-		return fmt.Errorf("Failed to register %v", sname)
+		return fmt.Errorf("WebSocketRPC: Failed to register %v", sname)
 	}
 	s.name = sname
 	s.method = suitableMethods(s.typ)
 	if len(s.method) == 0 {
-		return fmt.Errorf("Did not find any methods of %v to register", sname)
+		return fmt.Errorf("WebSocketRPC: Did not find any methods of %v to register", sname)
 	}
 	srv.serviceMap[sname] = s
 	return nil
@@ -57,7 +57,7 @@ func (srv *Server) StartServer() {
 // Send a message with subject and data over websocket in JSON format
 func Send(conn *websocket.Conn, subject string, data interface{}) error {
 	if conn == nil {
-		return fmt.Errorf("No connection; send failed")
+		return fmt.Errorf("WebSocketRPC: No connection; send failed")
 	}
 	type SocketRPCItem struct {
 		Subject string
@@ -75,7 +75,7 @@ func (srv *Server) rpcHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if srv.logging {
-		log.Println("Started websocket connection with ", con.RemoteAddr())
+		log.Println("WebSocketRPC: Started websocket connection with ", con.RemoteAddr())
 	}
 	for {
 		messageType, p, err := con.ReadMessage()
@@ -86,7 +86,7 @@ func (srv *Server) rpcHandler(w http.ResponseWriter, r *http.Request) {
 		if messageType == 1 {
 			srv.processRPCMessage(con, p)
 		} else {
-			log.Printf("Received Message Type %v, not handling\n", messageType)
+			log.Printf("WebSocketRPC: Received Message Type %v, not handling\n", messageType)
 		}
 	}
 }
@@ -99,23 +99,23 @@ func (srv *Server) processRPCMessage(con *websocket.Conn, b []byte) {
 	var sock SocketRPCItem
 	err := json.Unmarshal(b, &sock)
 	if err != nil || sock.Subject == "" {
-		log.Println("Received bad message: ", string(b))
+		log.Println("WebSocketRPC: Received bad message: ", string(b))
 		return
 	}
 	parts := strings.Split(sock.Subject, ".")
 	// parts[0] = Type, [1] = Method
 	if len(parts) != 2 {
-		log.Println("Bad Subject Format: ", sock.Subject)
+		log.Println("WebSocketRPC: Bad Subject Format: ", sock.Subject)
 		return
 	}
 	service, found := srv.serviceMap[parts[0]]
 	if found == false {
-		log.Println("Could not find type: ", parts[0])
+		log.Println("WebSocketRPC: Could not find type: ", parts[0])
 		return
 	}
 	mt, found := service.method[parts[1]]
 	if found == false {
-		log.Printf("In Type %v Could not find method: %v\n", parts[0], parts[1])
+		log.Printf("WebSocketRPC: In Type %v Could not find method: %v\n", parts[0], parts[1])
 		return
 	}
 
@@ -124,24 +124,24 @@ func (srv *Server) processRPCMessage(con *websocket.Conn, b []byte) {
 	switch mt.hasArg {
 	case false:
 		if srv.logging {
-			log.Printf("RPC call %v", sock.Subject)
+			log.Printf("WebSocketRPC: RPC call %v", sock.Subject)
 		}
 		returnValues = function.Call([]reflect.Value{service.rcvr, reflect.ValueOf(con)})
 	case true:
 		argv, err := buildArg(mt, sock.Data)
 		if err != nil {
-			log.Printf("For method %v, data sent did not match method signature: %v\n", sock.Subject, string(sock.Data))
+			log.Printf("WebSocketRPC: For method %v, data sent did not match method signature: %v\n", sock.Subject, string(sock.Data))
 			return
 		}
 		if srv.logging {
-			log.Printf("RPC call %v with: %v\n ", sock.Subject, string(sock.Data))
+			log.Printf("WebSocketRPC: RPC call %v with: %v\n ", sock.Subject, string(sock.Data))
 		}
 		returnValues = function.Call([]reflect.Value{service.rcvr, reflect.ValueOf(con), argv})
 	}
 	if len(returnValues) > 0 {
 		err = con.WriteJSON(returnValues[0].Interface())
 		if err != nil {
-			log.Println("Error sending return ", err)
+			log.Println("WebSocketRPC: Error sending return ", err)
 		}
 	}
 }
@@ -158,7 +158,7 @@ func buildArg(mt *methodType, d json.RawMessage) (reflect.Value, error) {
 	}
 	err := json.Unmarshal(d, argv.Interface())
 	if err != nil {
-		return argv, err
+		return reflect.Value{}, err
 	}
 	if argIsValue {
 		argv = argv.Elem()
@@ -189,7 +189,7 @@ func suitableMethods(typ reflect.Type) map[string]*methodType {
 		mname := method.Name
 		// Method must be exported, otherwise skip
 		if method.PkgPath != "" {
-			log.Printf("Register: method %q is not exported, skipping\n", mname)
+			log.Printf("WebSocketRPC: Register method %q is not exported, skipping\n", mname)
 			continue
 		}
 		savedMethod := &methodType{method: method}
@@ -201,10 +201,10 @@ func suitableMethods(typ reflect.Type) map[string]*methodType {
 			savedMethod.hasArg = true
 			savedMethod.ArgType = mtype.In(2)
 		default:
-			log.Printf("Register: method %q has bad number of arguments\n", mname)
+			log.Printf("WebSocketRPC: Register method %q has bad number of arguments\n", mname)
 		}
 		if mtype.NumOut() > 1 {
-			log.Printf("Register: method %q has bad number of return values, max is 1\n", mname)
+			log.Printf("WebSocketRPC: Register method %q has bad number of return values, max is 1\n", mname)
 		}
 		methods[mname] = savedMethod
 	}
