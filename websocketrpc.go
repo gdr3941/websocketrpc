@@ -86,7 +86,7 @@ func (srv *Server) rpcHandler(w http.ResponseWriter, r *http.Request) {
 		if messageType == 1 {
 			srv.processRPCMessage(con, p)
 		} else {
-			log.Printf("WebSocketRPC: Received Message Type %v, not handling\n", messageType)
+			log.Printf("WebSocketRPC: Received Message Type %v, not handling", messageType)
 		}
 	}
 }
@@ -115,7 +115,7 @@ func (srv *Server) processRPCMessage(con *websocket.Conn, b []byte) {
 	}
 	mt, found := service.method[parts[1]]
 	if found == false {
-		log.Printf("WebSocketRPC: In Type %v Could not find method: %v\n", parts[0], parts[1])
+		log.Printf("WebSocketRPC: In Type %v Could not find method: %v", parts[0], parts[1])
 		return
 	}
 
@@ -130,11 +130,11 @@ func (srv *Server) processRPCMessage(con *websocket.Conn, b []byte) {
 	case true:
 		argv, err := buildArg(mt, sock.Data)
 		if err != nil {
-			log.Printf("WebSocketRPC: For method %v, data sent did not match method signature: %v\n", sock.Subject, string(sock.Data))
+			log.Printf("WebSocketRPC: For method %v, data sent did not match method signature: %v", sock.Subject, string(sock.Data))
 			return
 		}
 		if srv.logging {
-			log.Printf("WebSocketRPC: RPC call %v with: %v\n ", sock.Subject, string(sock.Data))
+			log.Printf("WebSocketRPC: RPC call %v with: %v", sock.Subject, string(sock.Data))
 		}
 		returnValues = function.Call([]reflect.Value{service.rcvr, reflect.ValueOf(con), argv})
 	}
@@ -189,7 +189,7 @@ func suitableMethods(typ reflect.Type) map[string]*methodType {
 		mname := method.Name
 		// Method must be exported, otherwise skip
 		if method.PkgPath != "" {
-			log.Printf("WebSocketRPC: Register method %q is not exported, skipping\n", mname)
+			log.Printf("WebSocketRPC: Register method %q is not exported, skipping", mname)
 			continue
 		}
 		savedMethod := &methodType{method: method}
@@ -201,10 +201,10 @@ func suitableMethods(typ reflect.Type) map[string]*methodType {
 			savedMethod.hasArg = true
 			savedMethod.ArgType = mtype.In(2)
 		default:
-			log.Printf("WebSocketRPC: Register method %q has bad number of arguments\n", mname)
+			log.Printf("WebSocketRPC: Register method %q has bad number of arguments", mname)
 		}
 		if mtype.NumOut() > 1 {
-			log.Printf("WebSocketRPC: Register method %q has bad number of return values, max is 1\n", mname)
+			log.Printf("WebSocketRPC: Register method %q has bad number of return values, max is 1", mname)
 		}
 		methods[mname] = savedMethod
 	}
