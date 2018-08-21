@@ -7,22 +7,32 @@ import (
 	"net/http"
 	"reflect"
 	"strings"
+	"time"
 
 	"github.com/gorilla/websocket"
 )
 
+const (
+	sendQueueSize = 5
+)
+
 // Server manages the RPC over websocket
 type Server struct {
+	SendChan   chan interface{}
 	addr       string
-	serviceMap map[string]*service
 	logging    bool
+	serviceMap map[string]*service
+	semaCh     chan struct{}
 }
 
 // NewServer creates a new WebSocketRPCServer on addr (ex. localhost:8080)
 // errors are always logged; setting logging adds additional logging of calls
+// designed for only one concurrent connection to frontend
 func NewServer(addr string, logging bool) *Server {
 	srv := &Server{addr: addr, logging: logging}
 	srv.serviceMap = make(map[string]*service)
+	srv.semaCh = make(chan struct{}, 1)                  // Max of 1 concurrent connection
+	srv.SendChan = make(chan interface{}, sendQueueSize) // Max Queue of 5 messages
 	return srv
 }
 
@@ -55,19 +65,30 @@ func (srv *Server) StartServer() {
 }
 
 // Send a message with subject and data over websocket in JSON format
-func Send(conn *websocket.Conn, subject string, data interface{}) error {
-	if conn == nil {
-		return fmt.Errorf("WebSocketRPC: No connection; send failed")
-	}
+// Safe to use from multiple goroutines as it is consolidated over a channel
+func (srv *Server) Send(subject string, data interface{}) {
 	type SocketRPCItem struct {
 		Subject string
 		Data    interface{}
 	}
 	t := &SocketRPCItem{Subject: subject, Data: data}
-	return conn.WriteJSON(t)
+	srv.SendChan <- t // using channel to consolidate sends to one thread as required by gorilla websocket
 }
 
 func (srv *Server) rpcHandler(w http.ResponseWriter, r *http.Request) {
+	// Make sure only one connection
+	timeOut := time.NewTimer(time.Millisecond * 1200)
+	select {
+	case srv.semaCh <- struct{}{}:
+		defer func() {
+			<-srv.semaCh
+		}()
+	case <-timeOut.C:
+		log.Println("WebSocketRPC: Attempt to open second connection, rejecting")
+		http.Error(w, "Connection already in use", 429)
+		return
+	}
+	// Upgrade to websocket connection
 	upgrader := websocket.Upgrader{} // use default options
 	con, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -77,6 +98,12 @@ func (srv *Server) rpcHandler(w http.ResponseWriter, r *http.Request) {
 	if srv.logging {
 		log.Println("WebSocketRPC: Started websocket connection with ", con.RemoteAddr())
 	}
+	// Setup send channel on this connection
+	quitCh := make(chan struct{})
+	go srv.handleSendChannel(con, quitCh) // Launch goroutine to manage all sends as can only have one send thread
+	defer func() {
+		quitCh <- struct{}{}
+	}()
 	for {
 		messageType, p, err := con.ReadMessage()
 		if err != nil {
@@ -87,6 +114,24 @@ func (srv *Server) rpcHandler(w http.ResponseWriter, r *http.Request) {
 			srv.processRPCMessage(con, p)
 		} else {
 			log.Printf("WebSocketRPC: Received Message Type %v, not handling", messageType)
+		}
+	}
+}
+
+func (srv *Server) handleSendChannel(con *websocket.Conn, quitCh chan struct{}) {
+	fmt.Println("Opening Send Channel Go Routine")
+	for {
+		select {
+		case item := <-srv.SendChan:
+			err := con.WriteJSON(item)
+			if err != nil {
+				log.Println("WebSocketRPC: Error sending return ", err)
+			} else if srv.logging {
+				log.Println("WebSocketRPC: Sent ", item)
+			}
+		case <-quitCh:
+			fmt.Println("Closing Send Go Routine")
+			return
 		}
 	}
 }
@@ -118,7 +163,6 @@ func (srv *Server) processRPCMessage(con *websocket.Conn, b []byte) {
 		log.Printf("WebSocketRPC: In Type %v Could not find method: %v", parts[0], parts[1])
 		return
 	}
-
 	function := mt.method.Func
 	var returnValues []reflect.Value
 	switch mt.hasArg {
@@ -139,10 +183,7 @@ func (srv *Server) processRPCMessage(con *websocket.Conn, b []byte) {
 		returnValues = function.Call([]reflect.Value{service.rcvr, reflect.ValueOf(con), argv})
 	}
 	if len(returnValues) > 0 {
-		err = con.WriteJSON(returnValues[0].Interface())
-		if err != nil {
-			log.Println("WebSocketRPC: Error sending return ", err)
-		}
+		srv.SendChan <- returnValues[0].Interface()
 	}
 }
 
@@ -166,7 +207,7 @@ func buildArg(mt *methodType, d json.RawMessage) (reflect.Value, error) {
 	return argv, nil
 }
 
-// service represents the info on one class type (name) that is registered
+// service represents the info on a registered type
 type service struct {
 	name   string                 // name of service
 	rcvr   reflect.Value          // receiver of methods for the service
