@@ -85,7 +85,7 @@ func (srv *Server) rpcHandler(w http.ResponseWriter, r *http.Request) {
 		}()
 	case <-timeOut.C:
 		log.Println("WebSocketRPC: Attempt to open second connection, rejecting")
-		http.Error(w, "Connection already in use", 429)
+		http.Error(w, "WebSocket connection already in use", 429)
 		return
 	}
 	// Upgrade to websocket connection
@@ -104,6 +104,7 @@ func (srv *Server) rpcHandler(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		quitCh <- struct{}{}
 	}()
+	// Process incoming messages
 	for {
 		messageType, p, err := con.ReadMessage()
 		if err != nil {
@@ -119,7 +120,6 @@ func (srv *Server) rpcHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (srv *Server) handleSendChannel(con *websocket.Conn, quitCh chan struct{}) {
-	fmt.Println("Opening Send Channel Go Routine")
 	for {
 		select {
 		case item := <-srv.SendChan:
@@ -130,7 +130,6 @@ func (srv *Server) handleSendChannel(con *websocket.Conn, quitCh chan struct{}) 
 				log.Println("WebSocketRPC: Sent ", item)
 			}
 		case <-quitCh:
-			fmt.Println("Closing Send Go Routine")
 			return
 		}
 	}
