@@ -16,9 +16,9 @@ const (
 	sendQueueSize = 5
 )
 
-// Server manages the RPC over websocket
+// Server represents the websocketrpc server
 type Server struct {
-	SendChan   chan interface{}
+	sendChan   chan interface{}
 	addr       string
 	logging    bool
 	serviceMap map[string]*service
@@ -26,19 +26,19 @@ type Server struct {
 }
 
 // NewServer creates a new WebSocketRPCServer on addr (ex. localhost:8080)
-// errors are always logged; setting logging adds additional logging of calls
-// designed for only one concurrent connection to frontend
+// Errors are always logged; setting logging adds additional logging of activity
+// Designed for only one concurrent connection to frontend
 func NewServer(addr string, logging bool) *Server {
 	srv := &Server{addr: addr, logging: logging}
 	srv.serviceMap = make(map[string]*service)
 	srv.semaCh = make(chan struct{}, 1)                  // Max of 1 concurrent connection
-	srv.SendChan = make(chan interface{}, sendQueueSize) // Max Queue of 5 messages
+	srv.sendChan = make(chan interface{}, sendQueueSize) // Max Queue of 5 messages
 	return srv
 }
 
-// Register a type with the server
+// Register type with the server
 // Methods must be Exported (capital first letter)
-// First Arg must be the websocket.Conn type for receiving the active connection
+// First Arg must be the Server type
 // Optional second Arg for data
 // If have return type, it is encoded and sent back over connection
 func (srv *Server) Register(rcvr interface{}) error {
@@ -67,12 +67,16 @@ func (srv *Server) StartServer() {
 // Send a message with subject and data over websocket in JSON format
 // Safe to use from multiple goroutines as it is consolidated over a channel
 func (srv *Server) Send(subject string, data interface{}) {
-	type SocketRPCItem struct {
-		Subject string
-		Data    interface{}
+	if data != nil {
+		srv.sendChan <- struct {
+			Subject string
+			Data    interface{}
+		}{Subject: subject, Data: data}
+	} else {
+		srv.sendChan <- struct {
+			Subject string
+		}{Subject: subject}
 	}
-	t := &SocketRPCItem{Subject: subject, Data: data}
-	srv.SendChan <- t // using channel to consolidate sends to one thread as required by gorilla websocket
 }
 
 func (srv *Server) rpcHandler(w http.ResponseWriter, r *http.Request) {
@@ -122,7 +126,7 @@ func (srv *Server) rpcHandler(w http.ResponseWriter, r *http.Request) {
 func (srv *Server) handleSendChannel(con *websocket.Conn, quitCh chan struct{}) {
 	for {
 		select {
-		case item := <-srv.SendChan:
+		case item := <-srv.sendChan:
 			err := con.WriteJSON(item)
 			if err != nil {
 				log.Println("WebSocketRPC: Error sending return ", err)
@@ -169,7 +173,7 @@ func (srv *Server) processRPCMessage(con *websocket.Conn, b []byte) {
 		if srv.logging {
 			log.Printf("WebSocketRPC: RPC call %v", sock.Subject)
 		}
-		returnValues = function.Call([]reflect.Value{service.rcvr, reflect.ValueOf(con)})
+		returnValues = function.Call([]reflect.Value{service.rcvr, reflect.ValueOf(srv)})
 	case true:
 		argv, err := buildArg(mt, sock.Data)
 		if err != nil {
@@ -179,10 +183,10 @@ func (srv *Server) processRPCMessage(con *websocket.Conn, b []byte) {
 		if srv.logging {
 			log.Printf("WebSocketRPC: RPC call %v with: %v", sock.Subject, string(sock.Data))
 		}
-		returnValues = function.Call([]reflect.Value{service.rcvr, reflect.ValueOf(con), argv})
+		returnValues = function.Call([]reflect.Value{service.rcvr, reflect.ValueOf(srv), argv})
 	}
 	if len(returnValues) > 0 {
-		srv.SendChan <- returnValues[0].Interface()
+		srv.sendChan <- returnValues[0].Interface()
 	}
 }
 
@@ -233,7 +237,7 @@ func suitableMethods(typ reflect.Type) map[string]*methodType {
 			continue
 		}
 		savedMethod := &methodType{method: method}
-		// NumIn(0) = receiver, (1) should be websocket.Conn, (2) should be optional data
+		// NumIn(0) = receiver, (1) should be Server, (2) should be optional data
 		switch mtype.NumIn() {
 		case 2:
 			savedMethod.hasArg = false
