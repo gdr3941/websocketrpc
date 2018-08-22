@@ -68,10 +68,7 @@ func (srv *Server) StartServer() {
 // Safe to use from multiple goroutines as it is consolidated over a channel
 func (srv *Server) Send(subject string, data interface{}) {
 	if data != nil {
-		srv.sendChan <- struct {
-			Subject string
-			Data    interface{}
-		}{Subject: subject, Data: data}
+		srv.sendChan <- Message{Subject: subject, Data: data}
 	} else {
 		srv.sendChan <- struct {
 			Subject string
@@ -208,6 +205,12 @@ func buildArg(mt *methodType, d json.RawMessage) (reflect.Value, error) {
 		argv = argv.Elem()
 	}
 	return argv, nil
+}
+
+// Message represents the standard structure for sending messages over the socket using this API
+type Message struct {
+	Subject string
+	Data    interface{}
 }
 
 // service represents the info on a registered type
